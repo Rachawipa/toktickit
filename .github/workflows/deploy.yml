@@ -38,7 +38,8 @@ jobs:
   deploy:
     needs: [test]
     # Run when tests passed, or when test was skipped (rollback).
-    if: ${{ always() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
+    # Skipped (not failed) until GCP is configured: set the WIF_PROVIDER repo variable.
+    if: ${{ always() && vars.WIF_PROVIDER != '' && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
@@ -86,6 +87,7 @@ jobs:
             DATABASE_URL=toktickit-database-url:latest
           flags: >-
             --add-cloudsql-instances=${{ vars.CLOUD_SQL_INSTANCE }}
+            --service-account=toktickit-run@${{ vars.GCP_PROJECT_ID }}.iam.gserviceaccount.com
             --allow-unauthenticated
             --max-instances=2
             --port=3000
