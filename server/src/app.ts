@@ -21,23 +21,24 @@ export const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Setup uploads directory
+// Attachments are stored in PostgreSQL (column Attachment.data) so they survive
+// Cloud Run redeploys. Multer keeps the upload in memory (5 MB limit below).
+// Legacy rows that only have a file on disk are still served from UPLOADS_DIR.
 const UPLOADS_DIR = path.join(__dirname, "../uploads");
-if (!fs.existsSync(UPLOADS_DIR)) {
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-}
+const storage = multer.memoryStorage();
 
-// Multer storage configuration
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, UPLOADS_DIR);
-  },
-  filename: (_req, file, cb) => {
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    const ext = path.extname(file.originalname);
-    cb(null, file.fieldname + "-" + uniqueSuffix + ext);
-  },
-});
+// Attachment fields safe to return in JSON (never the file bytes).
+const attachmentPublicSelect = {
+  id: true,
+  ticketId: true,
+  filename: true,
+  originalName: true,
+  size: true,
+  mimeType: true,
+  isRemoved: true,
+  removeReason: true,
+  createdAt: true,
+} as const;
 
 const upload = multer({
   storage,
@@ -476,7 +477,7 @@ app.get("/api/tickets/:id", authenticate, async (req: AuthenticatedRequest, res:
         category: true,
         requester: { select: { id: true, name: true, email: true } },
         owner: { select: { id: true, name: true, email: true } },
-        attachments: true,
+        attachments: { select: attachmentPublicSelect },
         actionsTaken: {
           include: { performedBy: { select: { id: true, name: true, email: true, role: true } } },
           orderBy: { actionDateTime: "asc" },
@@ -1307,14 +1308,18 @@ app.post("/api/tickets/:id/attachments", authenticate, async (req: Authenticated
         return;
       }
 
+      const ext = path.extname(req.file.originalname);
+      const storedName = "file-" + Date.now() + "-" + Math.round(Math.random() * 1e9) + ext;
       const attachment = await getPrisma().attachment.create({
         data: {
           ticketId: id,
-          filename: req.file.filename,
+          filename: storedName,
           originalName: req.file.originalname,
           size: req.file.size,
           mimeType: req.file.mimetype,
+          data: req.file.buffer,
         },
+        select: attachmentPublicSelect,
       });
 
       res.status(201).json(attachment);
@@ -1350,9 +1355,15 @@ app.get("/api/attachments/:id", authenticate, async (req: AuthenticatedRequest, 
       return;
     }
 
+    if (attachment.data) {
+      res.type(attachment.mimeType).send(Buffer.from(attachment.data));
+      return;
+    }
+
+    // Legacy attachment stored on disk before the move to PostgreSQL.
     const filePath = path.join(UPLOADS_DIR, attachment.filename);
     if (!fs.existsSync(filePath)) {
-      res.status(404).json({ error: "File not found on disk" });
+      res.status(404).json({ error: "File not found" });
       return;
     }
 
@@ -1394,10 +1405,12 @@ app.delete("/api/attachments/:id", authenticate, async (req: AuthenticatedReques
       data: {
         isRemoved: true,
         removeReason: reason.trim(),
+        data: null,
       },
+      select: attachmentPublicSelect,
     });
 
-    // Delete file from disk
+    // Delete legacy file from disk, if any
     const filePath = path.join(UPLOADS_DIR, attachment.filename);
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
