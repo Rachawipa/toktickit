@@ -9,5 +9,8 @@ if [ "${RUN_SEED:-true}" = "true" ]; then
   npm run prisma:seed
 fi
 
+echo "Bootstrapping categories and initial administrator (if configured)..."
+npm run prisma:bootstrap
+
 echo "Starting TokTickIT API server..."
 exec "$@"

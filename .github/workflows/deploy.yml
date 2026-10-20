@@ -83,8 +83,10 @@ jobs:
           env_vars: |
             NODE_ENV=production
             RUN_SEED=false
+            ADMIN_EMAIL=${{ vars.ADMIN_EMAIL }}
           secrets: |
             DATABASE_URL=toktickit-database-url:latest
+            ADMIN_PASSWORD=toktickit-admin-password:latest
           flags: >-
             --add-cloudsql-instances=${{ vars.CLOUD_SQL_INSTANCE }}
             --service-account=toktickit-run@${{ vars.GCP_PROJECT_ID }}.iam.gserviceaccount.com

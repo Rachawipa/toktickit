@@ -800,11 +800,13 @@ export default function App() {
                   </button>
                 </form>
 
-                <div className="text-center mt-3">
-                  <span className="text-muted small">Default seed password for all accounts is: </span>
-                  <br />
-                  <code className="text-green-secondary">password123</code>
-                </div>
+                {import.meta.env.DEV && (
+                  <div className="text-center mt-3">
+                    <span className="text-muted small">Default seed password for all accounts is: </span>
+                    <br />
+                    <code className="text-green-secondary">password123</code>
+                  </div>
+                )}
               </div>
             </div>
           </div>
