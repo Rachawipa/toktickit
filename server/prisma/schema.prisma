@@ -69,6 +69,7 @@ model Attachment {
   originalName String
   size         Int
   mimeType     String
+  data         Bytes?
   isRemoved    Boolean  @default(false)
   removeReason String?
   createdAt    DateTime @default(now())
