@@ -1,0 +1,103 @@
+# CD: on merge to main -> build image -> push to Artifact Registry -> deploy to Cloud Run -> smoke test.
+# Rollback: Actions -> "Deploy" -> Run workflow -> enter an existing image tag (a previous commit SHA).
+# Auth uses Workload Identity Federation (no service-account keys).
+#
+# One-time setup (repo Settings -> Secrets and variables -> Actions -> Variables):
+#   GCP_PROJECT_ID, GCP_REGION, AR_REPOSITORY, CLOUD_RUN_SERVICE,
+#   WIF_PROVIDER, WIF_SERVICE_ACCOUNT, CLOUD_SQL_INSTANCE (project:region:instance)
+# Secrets live in Secret Manager: toktickit-database-url (DATABASE_URL).
+# Optional repo secrets for authenticated smoke test: SMOKE_EMAIL, SMOKE_PASSWORD.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Existing image tag to (re)deploy, e.g. a previous commit SHA. Empty = build current commit."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.AR_REPOSITORY }}/${{ vars.CLOUD_RUN_SERVICE }}
+
+jobs:
+  test:
+    # Re-use the PR checks; skipped for rollbacks of an existing image.
+    if: ${{ !inputs.image_tag }}
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: [test]
+    # Run when tests passed, or when test was skipped (rollback).
+    if: ${{ always() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${{ vars.GCP_REGION }}-docker.pkg.dev" --quiet
+
+      - name: Build and push image
+        if: ${{ !inputs.image_tag }}
+        run: |
+          docker build -t "$IMAGE:${{ github.sha }}" .
+          docker push "$IMAGE:${{ github.sha }}"
+
+      - name: Resolve image tag
+        id: tag
+        run: echo "tag=${{ inputs.image_tag || github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify image exists (rollback safety)
+        run: gcloud artifacts docker images describe "$IMAGE:${{ steps.tag.outputs.tag }}"
+
+      - id: deploy
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          service: ${{ vars.CLOUD_RUN_SERVICE }}
+          region: ${{ vars.GCP_REGION }}
+          image: ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+          env_vars: |
+            NODE_ENV=production
+            RUN_SEED=false
+          secrets: |
+            DATABASE_URL=toktickit-database-url:latest
+          flags: >-
+            --add-cloudsql-instances=${{ vars.CLOUD_SQL_INSTANCE }}
+            --allow-unauthenticated
+            --max-instances=2
+            --port=3000
+
+      - name: Smoke test
+        env:
+          SMOKE_EMAIL: ${{ secrets.SMOKE_EMAIL }}
+          SMOKE_PASSWORD: ${{ secrets.SMOKE_PASSWORD }}
+        run: ./scripts/smoke-test.sh "${{ steps.deploy.outputs.url }}"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Image: $IMAGE:${{ steps.tag.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "URL: ${{ steps.deploy.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
