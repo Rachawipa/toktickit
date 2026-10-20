@@ -1,8 +1,8 @@
 // Production bootstrap: creates the categories and the first administrator
 // without running the demo seed. Idempotent: an existing user is never modified.
 // Needs ADMIN_EMAIL and ADMIN_PASSWORD (from Secret Manager in Cloud Run).
-import { getPrisma } from "../src/prisma.js";
-import { hashPassword } from "../src/auth.js";
+import { getPrisma } from "./prisma.js";
+import { hashPassword } from "./auth.js";
 
 async function main() {
   const prisma = getPrisma();
