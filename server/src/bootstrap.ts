@@ -1,4 +1,4 @@
-// Production bootstrap: creates the categories and the first administrator
+// Production bootstrap: creates the categories, related systems and the first administrator
 // without running the demo seed. Idempotent: an existing user is never modified.
 // Needs ADMIN_EMAIL and ADMIN_PASSWORD (from Secret Manager in Cloud Run).
 import { getPrisma } from "./prisma.js";
@@ -9,6 +9,11 @@ async function main() {
 
   for (const name of ["Account and Access", "Hardware", "Software", "Network"]) {
     await prisma.category.upsert({ where: { name }, update: {}, create: { name } });
+  }
+
+  const systems = ["Email", "Campus Wi-Fi", "VPN", "LEB2 App", "Grade Submission App", "Printer", "Corporate Laptop"];
+  for (const name of systems) {
+    await prisma.relatedSystem.upsert({ where: { name }, update: {}, create: { name, isActive: true } });
   }
 
   const email = process.env.ADMIN_EMAIL;
