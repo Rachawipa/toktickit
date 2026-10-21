@@ -32,3 +32,6 @@ playwright-report/
 npm-debug.log*
 .DS_Store
 Thumbs.db
+
+# local persistence-check state (contains a login token)
+.persistence-state.json
