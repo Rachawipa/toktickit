@@ -123,3 +123,10 @@ model Session {
 
   @@index([expiresAt])
 }
+
+model LoginAttempt {
+  key         String    @id
+  failures    Int       @default(0)
+  windowStart DateTime
+  lockedUntil DateTime?
+}

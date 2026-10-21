@@ -18,6 +18,8 @@ const __dirname = path.dirname(__filename);
 
 export const app = express();
 
+// Behind Cloud Run: use the client IP from X-Forwarded-For (needed by the login rate limit).
+app.set("trust proxy", 1);
 app.use(cors());
 app.use(express.json());
 
@@ -146,6 +148,38 @@ app.get("/api/health", (_req: Request, res: Response) => {
   res.status(200).json({ status: "ok", service: "TokTickIT API" });
 });
 
+// Login rate limit: after LOGIN_MAX_ATTEMPTS failed logins within LOGIN_WINDOW_MINUTES for the
+// same IP + email, further attempts get 429 until the window ends. Stored in PostgreSQL so it
+// holds across restarts and several Cloud Run instances. Read at request time so tests can tune it.
+const loginLimits = () => ({
+  maxAttempts: Number(process.env.LOGIN_MAX_ATTEMPTS) || 5,
+  windowMs: (Number(process.env.LOGIN_WINDOW_MINUTES) || 15) * 60 * 1000,
+});
+const loginKey = (req: Request, email: string) => `${req.ip ?? "unknown"}|${String(email).toLowerCase()}`;
+
+async function loginLockedSeconds(key: string): Promise<number> {
+  const row = await getPrisma().loginAttempt.findUnique({ where: { key } });
+  if (!row?.lockedUntil) return 0;
+  const left = row.lockedUntil.getTime() - Date.now();
+  return left > 0 ? Math.ceil(left / 1000) : 0;
+}
+
+async function recordLoginFailure(key: string): Promise<void> {
+  const { maxAttempts, windowMs } = loginLimits();
+  const now = new Date();
+  const row = await getPrisma().loginAttempt.findUnique({ where: { key } });
+  const expired = !row || now.getTime() - row.windowStart.getTime() > windowMs;
+  const failures = expired ? 1 : row!.failures + 1;
+  const data = {
+    failures,
+    windowStart: expired ? now : row!.windowStart,
+    lockedUntil: failures >= maxAttempts ? new Date(now.getTime() + windowMs) : null,
+  };
+  await getPrisma().loginAttempt.upsert({ where: { key }, create: { key, ...data }, update: data });
+  // Keep the table small: drop entries untouched for a day.
+  await getPrisma().loginAttempt.deleteMany({ where: { windowStart: { lt: new Date(now.getTime() - 24 * 60 * 60 * 1000) } } });
+}
+
 // 2. Auth Endpoints
 app.post("/api/auth/login", async (req: Request, res: Response) => {
   const { email, password } = req.body;
@@ -155,8 +189,17 @@ app.post("/api/auth/login", async (req: Request, res: Response) => {
   }
 
   try {
+    const key = loginKey(req, email);
+    const lockedFor = await loginLockedSeconds(key);
+    if (lockedFor > 0) {
+      res.setHeader("Retry-After", String(lockedFor));
+      res.status(429).json({ error: "Too many failed login attempts. Please try again later." });
+      return;
+    }
+
     const user = await getPrisma().user.findUnique({ where: { email } });
     if (!user) {
+      await recordLoginFailure(key);
       res.status(401).json({ error: "Invalid email or password" });
       return;
     }
@@ -168,10 +211,12 @@ app.post("/api/auth/login", async (req: Request, res: Response) => {
 
     const isValid = verifyPassword(password, user.passwordHash);
     if (!isValid) {
+      await recordLoginFailure(key);
       res.status(401).json({ error: "Invalid email or password" });
       return;
     }
 
+    await getPrisma().loginAttempt.deleteMany({ where: { key } });
     const token = await createSession(user.id, user.email, user.name, user.role);
     res.status(200).json({
       token,
